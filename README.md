@@ -79,6 +79,11 @@ Syringe.exe "gamemd.exe" -SPAWN -CD -SPEEDCONTROL -LOG
 | `stalltest` | `0` | 调试：首次绘制调用后 20 / 40 / 60 s，把游戏线程在绘制调用里卡这么多毫秒（验证 `maxgameticks`） |
 | `mouseprobe` | `false` | 调试：记录 `GetCursorPos` 钩子给游戏的坐标（真实位置 → 客户区 → 视口 → 游戏坐标）和游戏线程的键盘消息 |
 | `vsynctest` | `false` | 调试：呈现线程不等待、连续呈现（测量帧间隔 / 验证 vsync） |
+| `framesync` | `true` | Q165：游戏把整幅画面拷到主表面（QEC 每帧一次整幅 Blt）期间，每帧只上传、呈现一次；两帧之间的局部写入不上传（下一帧的整幅拷贝里已包含）。超过 `framefallback` ms 没有整帧拷贝（菜单、对话框、简报）时回到逐次变化即呈现的方式 |
+| `framefallback` | `50` | `framesync` 的回退时间（ms，10–500）。应大于游戏的一帧（30 fps = 33.3 ms），否则局部写入会抢在下一帧之前被上传 |
+| `renderpriority` | `0` | 实验（Q164）：呈现线程优先级（`SetThreadPriority`），0 = 正常，1 = 高于正常（cnc-ddraw 的值）。QEC 拖动地图时实测 1 没有让呈现间隔更均匀，游戏线程反而在我们的 Blt / Unlock 里多花约 40 ms/s，所以默认保持 0 |
+| `emptypresents` | `true` | 实验（Q164）：`true` = 游戏的绘制调用唤醒呈现线程、却没有带来新内容时也呈现一次（一直以来的做法）；`false` = 跳过（拖动地图时约每秒 30 次） |
+| `pacestats` | `false` | 调试：每 10 秒在 ddraw.log 写呈现间隔的 p50/p90/p99/最大值（任何模式；`presentsync=true` 时总是写），以及每次呈现的上传耗时百分位和上传字节数 |
 | `dump` | `false` | 调试：每 5 秒把主表面和最近一次被 Lock 的离屏表面写成 `ddraw_primary.bmp` / `ddraw_lastlock.bmp`（与 ddraw.log 同目录） |
 | `trace` | `false` | 调试：记录游戏模块的 GetDC / BeginPaint / BitBlt / StretchDIBits / CreateDialog… 调用（前 24 次 + 每 500 次）和每种不同的 Blt→主表面矩形 |
 

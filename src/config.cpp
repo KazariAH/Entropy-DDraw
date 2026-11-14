@@ -106,6 +106,20 @@ void config_load(HMODULE self)
     g_cfg.perfAB = read_int(ini, "perfab", 0);
     g_cfg.presentSync = read_bool(ini, "presentsync", false);   // Q163: off - coalescing made QEC stutter
     g_cfg.blitStats = read_bool(ini, "blitstats", false);
+    g_cfg.paceStats = read_bool(ini, "pacestats", false);
+    // Q165: frame-coherent presentation. 50 ms rather than one 30 fps frame (33.3 ms): a shorter fallback races the
+    // next frame of a 30 fps game and lets its partial writes through again.
+    g_cfg.frameSync = read_bool(ini, "framesync", true);
+    g_cfg.frameFallback = read_int(ini, "framefallback", 50);
+    if (g_cfg.frameFallback < 10) g_cfg.frameFallback = 10;
+    if (g_cfg.frameFallback > 500) g_cfg.frameFallback = 500;
+    // Q164 experiments for the map-pan judder (QEC runs on one core). Measured in QEC: above normal (cnc-ddraw's
+    // value) and skipping empty presents did not even out the present intervals, and the game then spent ~40 ms/s
+    // more inside our Blt / Unlock (preempted at the SetEvent) - so both stay at the old behaviour by default.
+    g_cfg.renderPriority = read_int(ini, "renderpriority", THREAD_PRIORITY_NORMAL);
+    if (g_cfg.renderPriority < THREAD_PRIORITY_LOWEST || g_cfg.renderPriority > THREAD_PRIORITY_HIGHEST)
+        g_cfg.renderPriority = THREAD_PRIORITY_NORMAL;
+    g_cfg.emptyPresents = read_bool(ini, "emptypresents", true);
     g_cfg.fusedUpload = read_bool(ini, "fusedupload", true);
     g_cfg.renderCluster = read_bool(ini, "rendercluster", false);
     g_cfg.verifyTex = read_int(ini, "verifytex", 0);

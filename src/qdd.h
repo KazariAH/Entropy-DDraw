@@ -178,6 +178,11 @@ struct Config {
                           // (default off since Q163: the coalescing made QEC's irregular drawing bursts stutter)
     bool fastStretch;     // Q150: stretch blits with a column table / memcpy runs instead of a division per pixel
     bool ntCopy;          // Q150 (blitcopy=sse2nt): copies of 1 MB+ between surfaces with non-temporal stores
+    bool frameSync;       // Q165: present once per game frame (full-surface copy to the primary), partial writes in between are not uploaded
+    int  frameFallback;   // Q165: ms without such a copy before the frame-less way (dirty rects + pollprimary) takes over again
+    int  renderPriority;  // Q164 experiment: SetThreadPriority of the render thread (0 = normal, default; 1 = above normal)
+    bool emptyPresents;   // Q164 experiment: legacy - also present on a wake-up that brought nothing new (default true)
+    bool paceStats;       // Q164 debug: present interval / upload time percentiles every 10 s in every mode
     bool blitStats;       // Q152 debug: full-size copies by surface pair, and what the game touches after a copy to the primary
     bool fusedUpload;     // Q153 B: changed rows read once from the primary, into the shadow and the pixel buffer
     bool renderCluster;   // Q153 C: the render thread follows the game thread's core cluster (shared L3 cache)
@@ -275,6 +280,7 @@ void clipper_release(Clipper *c);
 void render_start(HWND hwnd);
 void render_stop();
 void render_dirty(Surface *s, const RECT *r);   // r == NULL => whole surface
+void render_frame(Surface *s);                  // Q165: a copy onto the whole primary - the game finished a frame
 void render_full_dirty();
 void render_palette_changed(Palette *p);
 void render_kick();                              // request a redraw

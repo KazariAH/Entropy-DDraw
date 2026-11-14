@@ -757,6 +757,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
                   "guard_lines=%d guardtest=%d maxgameticks=%d stalltest=%d",
                   g_cfg.keyNextMonitor, g_cfg.monitorTestW, g_cfg.monitorTestH, g_cfg.resolutions, g_cfg.maxResolutions,
                   g_cfg.maxResW, g_cfg.maxResH, g_cfg.guardLines, g_cfg.guardTest, g_cfg.maxGameTicks, g_cfg.stallTest);
+        log_event("config: framesync=%d framefallback=%d renderpriority=%d emptypresents=%d pacestats=%d", g_cfg.frameSync,
+                  g_cfg.frameFallback, g_cfg.renderPriority, g_cfg.emptyPresents, g_cfg.paceStats);
         log_event("config: client=%s%s", g_cfg.ownIni ? "Entropy-DDraw" : "(none: not our ddraw.ini)",
                   g_cfg.foreignNoActivate ? " - its noactivateapp=false ignored, kept 1" : "");
         // The game window is created before DirectDrawCreate, so DPI awareness

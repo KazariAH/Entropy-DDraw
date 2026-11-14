@@ -58,6 +58,12 @@ static bool s_dcsInit;
 static RECT s_dirty;
 static bool s_hasDirty, s_fullDirty, s_palDirty;
 static long s_dirtyN;               // presentsync: drawing calls that changed the primary since the render thread took the dirty state
+// Q165 framesync: full-surface copies to the primary (game frames), the time of the last one (qpc_ms), and the
+// intervals between them (written by the game thread only, read and cleared at each stats flush)
+static volatile LONG s_frameN;
+static volatile double s_lastFrameMs;
+static long s_frameHist[1000];
+static long s_frameHistN;
 static volatile LONG s_force;       // window event: re-upload everything and present (rate limited)
 static volatile LONG s_forceCount;
 static volatile LONG s_rebuild;     // display mode / presentation change: new texture + complete upload
@@ -210,6 +216,33 @@ void render_dirty(Surface *s, const RECT *r)
         UnionRect(&s_dirty, &s_dirty, r);
         s_dirtyN++;
     }
+    LeaveCriticalSection(&s_dcs);
+    SetEvent(s_evt);
+}
+
+static double qpc_ms();
+
+// Q165: the game copied a surface onto the whole primary - its frame is complete. Marks everything dirty (the copy is
+// what gets uploaded) and counts the frame for the render thread; the interval between frames goes to the histogram.
+void render_frame(Surface *s)
+{
+    DDraw *dd = g_dd;
+    if (!dd || dd->primary != s || !s_thread)
+        return;
+    double now = qpc_ms(), prev = s_lastFrameMs;
+    if (prev > 0) {
+        double iv = now - prev;
+        if (iv > 0 && iv < 250.0) {
+            s_frameHist[(int)(iv * 4.0)]++;
+            s_frameHistN++;
+        }
+    }
+    ensure_cs();
+    lock_enter(&s_dcs, LK_DIRTY);
+    s_fullDirty = true;
+    s_dirtyN++;
+    s_lastFrameMs = now;
+    InterlockedIncrement(&s_frameN);
     LeaveCriticalSection(&s_dcs);
     SetEvent(s_evt);
 }
@@ -378,7 +411,9 @@ struct Stats {
     // present-to-present intervals (< 250 ms) and their distance to the display's refresh grid
     long ivN, ivOnGrid;
     double ivSum, ivSq, ivGridErr;
-    long ivHist[IV_BINS];   // the same intervals in 0.25 ms bins, for the presentsync percentiles
+    long ivHist[IV_BINS];   // the same intervals in 0.25 ms bins, for the presentsync / pacestats percentiles
+    long upHist[IV_BINS];   // pacestats: upload time per present in 0.05 ms bins (the last bin holds 50 ms and more)
+    long frameTicks, deferred;   // framesync: presents for a game frame; wake-ups whose partial writes waited for the frame
     // where in the refresh cycle each present ended (0 = right at the vertical blank, 1 = just before the next)
     long phN, phEarly;
     double phSum;
@@ -515,6 +550,29 @@ static void cost_flush(double seconds, const char *mode)
     have = true;
 }
 
+// p50 / p90 / p99 (upper bin edges) and the upper edge of the last filled bin of a histogram with n entries
+static void hist_percentiles(const long *hist, long n, double binMs, double at[3], double *top)
+{
+    static const double pct[] = {50, 90, 99};
+    at[0] = at[1] = at[2] = *top = 0;
+    long seen = 0;
+    int k = 0;
+    for (int b = 0; b < IV_BINS; b++) {
+        if (!hist[b])
+            continue;
+        seen += hist[b];
+        *top = (b + 1) * binMs;
+        while (k < 3 && seen * 100.0 >= pct[k] * n)
+            at[k++] = *top;
+    }
+}
+
+// the Q148 way without presentsync, where presentquiet / presentcap play no part
+static bool legacy_mode(const char *mode)
+{
+    return strcmp(mode, "legacy") == 0;
+}
+
 static void stats_flush(Stats &s, double seconds, const char *how, double period, const char *mode)
 {
     if (s.ivN > 1) {
@@ -526,23 +584,41 @@ static void stats_flush(Stats &s, double seconds, const char *how, double period
                   100.0 * s.ivOnGrid / s.ivN);
     }
     // presentsync coalesces the game's drawing bursts into one present; uneven bursts give uneven intervals (Q163) -
-    // the spread of the intervals is what a later retune of presentquiet / presentcap has to look at
-    if (s.ivN > 1 && strcmp(mode, "presentsync") == 0) {
-        static const double pct[] = {50, 90, 99};
+    // the spread of the intervals is what a later retune of presentquiet / presentcap has to look at. pacestats (Q164)
+    // logs the same in every mode, with the upload time per present and the bytes uploaded per present.
+    bool presentSyncMode = strcmp(mode, "presentsync") == 0;
+    if (s.ivN > 1 && (presentSyncMode || g_cfg.paceStats)) {
+        double at[3], top;
+        hist_percentiles(s.ivHist, s.ivN, 0.25, at, &top);
+        log_event("present intervals %.1fs [%s]: %ld, p50 %.2f ms p90 %.2f p99 %.2f max %.2f (bin upper edges, "
+                  "0.25 ms bins; presentquiet=%d presentcap=%d%s)",
+                  seconds, mode, s.ivN, at[0], at[1], at[2], top, g_cfg.presentQuiet, g_cfg.presentCap,
+                  presentSyncMode || !legacy_mode(mode) ? "" : ", not used in this mode");
+    }
+    if (g_cfg.paceStats && s.presents > 0) {
+        long n = 0;
+        for (int b = 0; b < IV_BINS; b++) n += s.upHist[b];
         double at[3] = {0, 0, 0}, top = 0;
-        long seen = 0;
-        int k = 0;
-        for (int b = 0; b < IV_BINS; b++) {
-            if (!s.ivHist[b])
-                continue;
-            seen += s.ivHist[b];
-            top = (b + 1) / 4.0;
-            while (k < 3 && seen * 100.0 >= pct[k] * s.ivN)
-                at[k++] = top;
+        if (n > 0)
+            hist_percentiles(s.upHist, n, 0.05, at, &top);
+        log_event("upload per present %.1fs [%s]: %ld presents (%ld with new pixels), p50 %.2f ms p90 %.2f p99 %.2f max %.2f, "
+                  "%.0f KB uploaded per present (%.0f KB per present with new pixels)",
+                  seconds, mode, s.presents, s.updates, at[0], at[1], at[2], top, s.upBytes / 1024.0 / s.presents,
+                  s.updates ? s.upBytes / 1024.0 / s.updates : 0.0);
+    }
+    {   // Q165: the game's frames (full-surface copies to the primary) as the game made them
+        long n = s_frameHistN;
+        if (n > 1 || s.frameTicks || s.deferred) {
+            double at[3] = {0, 0, 0}, top = 0;
+            if (n > 1)
+                hist_percentiles(s_frameHist, n, 0.25, at, &top);
+            log_event("game frames %.1fs [%s]: %ld full copies to the primary (%.1f/s), interval p50 %.2f ms p90 %.2f p99 %.2f "
+                      "max %.2f | framesync %s: %ld presents for a frame, %ld wake-ups with partial writes held back",
+                      seconds, mode, n, n / seconds, at[0], at[1], at[2], top,
+                      g_cfg.frameSync ? "on" : "off", s.frameTicks, s.deferred);
         }
-        log_event("present intervals %.1fs [presentsync]: %ld, p50 %.2f ms p90 %.2f p99 %.2f max %.2f (bin upper edges, "
-                  "0.25 ms bins; presentquiet=%d presentcap=%d)",
-                  seconds, s.ivN, at[0], at[1], at[2], top, g_cfg.presentQuiet, g_cfg.presentCap);
+        memset(s_frameHist, 0, sizeof(s_frameHist));
+        s_frameHistN = 0;
     }
     if (s.phN > 1)
         log_event("vblank phase %.1fs: %ld presents, mean phase %.2f of a refresh (0.50 if unrelated), %.0f%% in the first "
@@ -734,6 +810,10 @@ CRITICAL_SECTION *render_dirty_lock() { return &s_dcs; }
 static DWORD WINAPI render_thread(LPVOID)
 {
     s_renderTid = GetCurrentThreadId();
+    if (g_cfg.renderPriority != THREAD_PRIORITY_NORMAL) {
+        BOOL pr = SetThreadPriority(GetCurrentThread(), g_cfg.renderPriority);
+        log_event("render: thread priority %d %s", g_cfg.renderPriority, pr ? "set" : "could not be set");
+    }
     HWND hwnd = s_hwnd;
     HDC dc = GetDC(hwnd);
     if (!dc) {
@@ -838,6 +918,7 @@ static DWORD WINAPI render_thread(LPVOID)
 
     Palette *lastPal = NULL;
     double lastPresent = 0, lastForced = 0, lastChange = 0;
+    LONG frameSeen = 0;   // framesync: the last game frame presented
     bool texValid = false;
     int texBpp = 0;
     int lastFilter = -1;
@@ -987,6 +1068,29 @@ static DWORD WINAPI render_thread(LPVOID)
             }
         }
 
+        // framesync (Q165): while the game copies whole frames onto the primary, present once per such copy. Writes
+        // between two frames only wake the thread; they are not copied, not scanned and not uploaded - the next frame
+        // copy contains them anyway. No frame for framefallback ms: the frame-less way below (dirty rects, pollprimary)
+        // takes over again (menus, dialogs, the briefing, writes after the last frame).
+        bool frameTick = false;
+        if (legacy && !sync && g_cfg.frameSync && !forced && !rebuild && texValid && !g_cfg.vsyncTest) {
+            LONG fn = InterlockedCompareExchange(&s_frameN, 0, 0);
+            double lastFrame = s_lastFrameMs;
+            if (fn != frameSeen) {
+                frameSeen = fn;
+                frameTick = true;
+                st.frameTicks++;
+            } else if (lastFrame > 0 && t0 - lastFrame < g_cfg.frameFallback) {
+                EnterCriticalSection(&s_dcs);
+                bool pending = s_fullDirty || s_hasDirty;
+                LeaveCriticalSection(&s_dcs);
+                if (pending && signaled)
+                    st.deferred++;
+                nextWait = lastFrame + g_cfg.frameFallback - t0;
+                continue;
+            }
+        }
+
         EnterCriticalSection(&g_lock);
         bool lockHeld = true;
         double t1 = qpc_ms();
@@ -1033,7 +1137,7 @@ static DWORD WINAPI render_thread(LPVOID)
             }
             if (shadow_ensure(p))
                 full = true;
-            if (forced)
+            if (forced || frameTick)
                 full = true;
 
             EnterCriticalSection(&s_dcs);
@@ -1241,9 +1345,11 @@ static DWORD WINAPI render_thread(LPVOID)
         if (settling && !forced && !realloc && texValid && !g_cfg.vsyncTest)
             continue;
         // ticks with nothing new: keep a 10 Hz redraw rate instead of presenting every tick (legacy without
-        // presentsync: every
-        // wake-up by a drawing call presents, even when it changed nothing)
-        if (!changed && !forced && !realloc && texValid && (!legacy || sync || !signaled) && t0 - lastPresent < 100.0 &&
+        // presentsync and emptypresents=true, the default: every wake-up by a drawing call presents, even when it
+        // changed nothing - the game writes the primary several times per frame, ~30 such presents a second while
+        // panning the map in QEC)
+        if (!changed && !forced && !realloc && texValid && (!legacy || sync || !signaled || !g_cfg.emptyPresents) &&
+            t0 - lastPresent < 100.0 &&
             !g_cfg.vsyncTest)
             continue;
 
@@ -1403,6 +1509,10 @@ static DWORD WINAPI render_thread(LPVOID)
         }
         double tu1 = qpc_ms();
         stat_add(st, ST_UPLOAD, tu1 - tu0);
+        if (g_cfg.paceStats) {
+            int ub = (int)((tu1 - tu0) * 20.0);
+            st.upHist[ub < 0 ? 0 : ub >= IV_BINS ? IV_BINS - 1 : ub]++;
+        }
         // verifytex (Q153 debug): every N s the texture is read back and compared with the shadow - after an upload
         // they must be identical (16 / 32 bpp, direct upload paths)
         if (g_cfg.verifyTex > 0 && useGL && haveImage && texValid && s_shadow && gl12 && (bpp == 16 || bpp == 32) &&

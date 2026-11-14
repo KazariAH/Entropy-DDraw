@@ -750,6 +750,11 @@ static HRESULT do_blt(Surface *d, const RECT *pdr, Surface *s, const RECT *psr, 
             if (big) bs_copy(s, d);
             else bs_touch(d, 3);
         }
+        // Q165: another surface copied onto the whole primary = the game finished a frame (QEC: #8 -> primary)
+        if (s != d && dr.left == 0 && dr.top == 0 && dr.right == d->w && dr.bottom == d->h && d->dd && d->dd->primary == d) {
+            render_frame(d);
+            return DD_OK;
+        }
     } else {
         // the source rectangle must lie inside the source surface
         RECT sc = sr;
