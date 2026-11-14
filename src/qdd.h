@@ -175,6 +175,7 @@ struct Config {
     int  perfAB;          // debug: alternate "before" and the configured way every this many seconds (same session A/B)
     bool presentSync;     // Q150 (writewatch=false): present once the game's Blt / Unlock signals to the primary stop for
                           // presentquiet ms (at most presentcap) - one present per drawn frame without write watching
+                          // (default off since Q163: the coalescing made QEC's irregular drawing bursts stutter)
     bool fastStretch;     // Q150: stretch blits with a column table / memcpy runs instead of a division per pixel
     bool ntCopy;          // Q150 (blitcopy=sse2nt): copies of 1 MB+ between surfaces with non-temporal stores
     bool blitStats;       // Q152 debug: full-size copies by surface pair, and what the game touches after a copy to the primary

@@ -47,6 +47,7 @@ Syringe.exe "gamemd.exe" -SPAWN -CD -SPEEDCONTROL -LOG
 | `bpp` | `16` | `SetDisplayMode` 之前报告的桌面色深 |
 | `pollprimary` | `true` | 把主表面可见区域与影子副本逐行比较，上传变化的行带。画面在变时约 100 Hz，0.5 秒没变化后降到约 30 Hz（Lock/Blt 仍立即唤醒）。QEC 的 Entropy.exe 会在 Unlock 之后继续写主表面（不经 Lock/Blt），关掉它在 QEC 下画面不更新 |
 | `normalmode` | `true` | `DDSCL_NORMAL` 的游戏（QEC）：把游戏窗口客户区当作“屏幕”——主表面 = 客户区大小，坐标 API 全部按客户区相对值回答（同独占全屏模拟）。画面与窗口位置无关，窗口可以随意拖动。`false` = 旧行为（桌面大小的主表面，按屏幕坐标取图） |
+| `presentsync` | `false` | `true` = 游戏对主表面的绘制调用（Blt / Unlock）停顿 `presentquiet` ms（最多 `presentcap` ms）后才呈现，一帧呈现一次；`presentquiet` / `presentcap` 只在它（或 `writewatch`）开启时生效。**注意：这种合并在绘制节奏不规则、成批绘制的游戏上会造成帧间隔不均（QEC 因此卡顿，Q163 起默认关）**；开启时 ddraw.log 每 10 秒写一行 `present intervals` 的 p50/p90/p99/最大值 |
 | `pbo` | `true` | 有像素缓冲对象（GL 1.5 / `ARB_pixel_buffer_object`）时经 PBO 异步上传；取不到函数自动退回同步 `glTexSubImage2D` |
 | `border` | `true` | 窗口状态保留标题栏/边框；`false` = 无边框窗口（`WS_POPUP\|WS_THICKFRAME` + 自己的 `WM_NCCALCSIZE`：整个窗口都是客户区；顶部 6 px 拖动，其余边/角 6–16 px 改尺寸）。含义与 cnc-ddraw 的 `border` 相同（客户端旧 ini 里的 `border=True` 表示“有边框”） |
 | `fullscreen` | `false` | 启动时就用无边框全屏（窗口铺满所在显示器，不改分辨率）；`savesettings` 记住的状态优先 |

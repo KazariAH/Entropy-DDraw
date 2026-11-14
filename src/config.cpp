@@ -104,7 +104,7 @@ void config_load(HMODULE self)
     if (g_cfg.presentCap < g_cfg.presentQuiet) g_cfg.presentCap = g_cfg.presentQuiet;
     if (g_cfg.presentCap > 30) g_cfg.presentCap = 30;
     g_cfg.perfAB = read_int(ini, "perfab", 0);
-    g_cfg.presentSync = read_bool(ini, "presentsync", true);
+    g_cfg.presentSync = read_bool(ini, "presentsync", false);   // Q163: off - coalescing made QEC stutter
     g_cfg.blitStats = read_bool(ini, "blitstats", false);
     g_cfg.fusedUpload = read_bool(ini, "fusedupload", true);
     g_cfg.renderCluster = read_bool(ini, "rendercluster", false);

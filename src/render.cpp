@@ -367,6 +367,7 @@ enum StatId { ST_LOCK, ST_COPY, ST_SCAN, ST_HOLD, ST_WW, ST_UPLOAD, ST_DRAW, ST_
 static const char *const s_statNames[ST_COUNT] = {"wait g_lock", "copy dirty", "scan (memcmp)", "hold g_lock",
                                                   "GetWriteWatch", "upload",
                                                   "draw", "SwapBuffers", "present total"};
+static const int IV_BINS = 1000;   // 0.25 ms bins below 250 ms (the interval_add limit)
 struct Stats {
     double sum[ST_COUNT], max[ST_COUNT];
     long ticks, presents, updates, fullUploads, forced, polled;
@@ -377,6 +378,7 @@ struct Stats {
     // present-to-present intervals (< 250 ms) and their distance to the display's refresh grid
     long ivN, ivOnGrid;
     double ivSum, ivSq, ivGridErr;
+    long ivHist[IV_BINS];   // the same intervals in 0.25 ms bins, for the presentsync percentiles
     // where in the refresh cycle each present ended (0 = right at the vertical blank, 1 = just before the next)
     long phN, phEarly;
     double phSum;
@@ -412,6 +414,7 @@ static void interval_add(Stats &s, double iv, double period)
     s.ivN++;
     s.ivSum += iv;
     s.ivSq += iv * iv;
+    s.ivHist[(int)(iv * 4.0)]++;
     if (period > 0) {
         double k = (double)(long)(iv / period + 0.5);
         double e = iv - k * period;
@@ -521,6 +524,25 @@ static void stats_flush(Stats &s, double seconds, const char *how, double period
                   "(random would be %.2f), %.0f%% within 0.5 ms",
                   seconds, s.ivN, avg, var > 0 ? sqrt(var) : 0.0, period, s.ivGridErr / s.ivN, period / 4,
                   100.0 * s.ivOnGrid / s.ivN);
+    }
+    // presentsync coalesces the game's drawing bursts into one present; uneven bursts give uneven intervals (Q163) -
+    // the spread of the intervals is what a later retune of presentquiet / presentcap has to look at
+    if (s.ivN > 1 && strcmp(mode, "presentsync") == 0) {
+        static const double pct[] = {50, 90, 99};
+        double at[3] = {0, 0, 0}, top = 0;
+        long seen = 0;
+        int k = 0;
+        for (int b = 0; b < IV_BINS; b++) {
+            if (!s.ivHist[b])
+                continue;
+            seen += s.ivHist[b];
+            top = (b + 1) / 4.0;
+            while (k < 3 && seen * 100.0 >= pct[k] * s.ivN)
+                at[k++] = top;
+        }
+        log_event("present intervals %.1fs [presentsync]: %ld, p50 %.2f ms p90 %.2f p99 %.2f max %.2f (bin upper edges, "
+                  "0.25 ms bins; presentquiet=%d presentcap=%d)",
+                  seconds, s.ivN, at[0], at[1], at[2], top, g_cfg.presentQuiet, g_cfg.presentCap);
     }
     if (s.phN > 1)
         log_event("vblank phase %.1fs: %ld presents, mean phase %.2f of a refresh (0.50 if unrelated), %.0f%% in the first "
@@ -846,7 +868,7 @@ static DWORD WINAPI render_thread(LPVOID)
 
     while (!s_stop) {
         // the Q148 way ("legacy"): dirty rects + comparing the primary with the shadow (pollprimary) under g_lock.
-        // presentsync (Q150, default): legacy, but a frame is presented once the game's drawing calls to the primary
+        // presentsync (Q150; default off since Q163): legacy, but a frame is presented once the game's drawing calls to the primary
         // (Blt / Unlock) stop for presentquiet ms - one present per drawn frame. writewatch: the pages the game
         // wrote, copied without g_lock once the burst of writes is over. perfab (Q153) rotates "before" (the Q151
         // way), B = fusedupload and B+C = fusedupload + rendercluster, the rest as configured.
