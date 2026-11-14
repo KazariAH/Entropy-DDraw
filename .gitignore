@@ -1,0 +1,16 @@
+# build output
+build/
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.exe
+imports.txt
+
+# runtime files produced next to the DLL
+ddraw.log
+ddraw_*.txt
+ddraw_*.dmp
+ddraw_journal_*.txt
+quantumddraw.state
+ddraw.ini.bak
