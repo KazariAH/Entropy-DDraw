@@ -1,6 +1,6 @@
 # QuantumDDraw
 
-自研的最小 `ddraw.dll`：把 DirectDraw 游戏（目标 `gamemd.exe` / 尤里的复仇 + Ares / Mental Omega）的系统内存表面用 **OpenGL 1.1 固定管线** 画到窗口里。
+自研的最小 `ddraw.dll`：把 DirectDraw 游戏（目标 `gamemd.exe` / 尤里的复仇 + Ares / Quantum Entropy Change / Mental Omega）的系统内存表面用 **OpenGL 1.1 固定管线** 画到窗口里。
 不含第三方代码，只用 Windows SDK + 系统 `opengl32.dll`。x86，`/MT` 静态 CRT，目标 Win7 SP1 → Win11。
 
 DLL 自带探针：每个接口方法都有调用计数，`ddraw.log` 每 5 秒重写一次。
