@@ -21,6 +21,16 @@ the only dependencies are the Windows SDK and the system `opengl32.dll`.
 - Targets Windows 7 SP1 through Windows 11, 32-bit, static CRT (`/MT`) - a single DLL, no runtime
   redistributable needed
 
+## Platform support
+
+| Platform | Status |
+|---|---|
+| Windows 7 SP1 - Windows 11 (x86) | **Supported.** Built and tested on Windows 11; the 32-bit DLL runs on 64-bit Windows through WOW64. |
+| Wine / Proton | **Not supported, not tested.** Nothing here relies on undocumented Windows behaviour, so it may work, but no promises - reports and patches are welcome. |
+| macOS | **Not supported.** Only reachable through Wine/CrossOver, which is untested. |
+| Android (Winlator, Box86, ...) | **Not supported.** Not a target platform. |
+
+Only the DirectDraw (software) rendering path of the game is replaced. Direct3D games are out of scope.
 ## Build
 
 Requirements: Windows, Visual Studio 2022 with the C++ x86 tools, PowerShell.
