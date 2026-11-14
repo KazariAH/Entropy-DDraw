@@ -122,6 +122,8 @@ struct Config {
     int  dpi;           // DpiMode: DPI awareness the process declares (permonitor = per-monitor v2)
     bool resizable;
     bool noActivateApp; // hide focus loss from the game (keeps running in the background)
+    bool ownIni;        // ddraw.ini carries [ddraw] client=Entropy-DDraw (ours, not a cnc-ddraw / other renderer ini)
+    bool foreignNoActivate; // a foreign ini said noactivateapp=false; ignored, our default true kept
     bool log;
     int  defaultBpp;    // bpp reported before SetDisplayMode
     bool pollPrimary;   // compare the visible primary with a shadow copy every tick (writes outside Lock/Blt)

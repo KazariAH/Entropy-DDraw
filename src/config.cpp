@@ -39,7 +39,17 @@ void config_load(HMODULE self)
     g_cfg.maxfps = read_int(ini, "maxfps", 0);
     g_cfg.hookMouse = read_bool(ini, "hookmouse", true);
     g_cfg.resizable = read_bool(ini, "resizable", true);
-    g_cfg.noActivateApp = read_bool(ini, "noactivateapp", true);   // Q147: like cnc-ddraw for RA2 / YR
+    {   // Q162: only our template carries [ddraw] client=Entropy-DDraw. A game folder can still hold the ddraw.ini of
+        // cnc-ddraw or another renderer (the client used to keep any existing file); its noactivateapp=false would make
+        // QEC pause whenever the window loses the focus, so without the marker our default true stays.
+        char c[32];
+        GetPrivateProfileStringA("ddraw", "client", "", c, sizeof(c), ini);
+        g_cfg.ownIni = _stricmp(c, "Entropy-DDraw") == 0;
+        g_cfg.noActivateApp = read_bool(ini, "noactivateapp", true);   // Q147: like cnc-ddraw for RA2 / YR
+        g_cfg.foreignNoActivate = !g_cfg.ownIni && !g_cfg.noActivateApp;
+        if (g_cfg.foreignNoActivate)
+            g_cfg.noActivateApp = true;
+    }
     g_cfg.log = read_bool(ini, "log", true);
     g_cfg.pollPrimary = read_bool(ini, "pollprimary", true);
     g_cfg.dump = read_bool(ini, "dump", false);
