@@ -750,9 +750,12 @@ static HRESULT do_blt(Surface *d, const RECT *pdr, Surface *s, const RECT *psr, 
             if (big) bs_copy(s, d);
             else bs_touch(d, 3);
         }
-        // Q165: another surface copied onto the whole primary = the game finished a frame (QEC: #8 -> primary)
-        if (s != d && dr.left == 0 && dr.top == 0 && dr.right == d->w && dr.bottom == d->h && d->dd && d->dd->primary == d) {
-            render_frame(d);
+        // Q165: another surface copied onto the whole primary = the game finished a frame (QEC: #8 -> primary).
+        // Q173: or onto all of its width from row 0 and at least 90 % of its height - a tester's QEC at 1920x1080
+        // copied its frames as 1920x1048 (the bottom strip drawn on its own), and framesync never saw a frame.
+        if (s != d && dr.left == 0 && dr.top == 0 && dr.right == d->w && (LONGLONG)dr.bottom * 10 >= (LONGLONG)d->h * 9 &&
+            d->dd && d->dd->primary == d) {
+            render_frame(d, dr.bottom == d->h);
             return DD_OK;
         }
     } else {
@@ -1184,7 +1187,14 @@ static HRESULT __stdcall S_Unlock(Surface *s, LPRECT)
     guard_check(s, "Unlock");
     if (s->locked) {
         s->locked = false;
-        render_dirty(s, &s->lockRect);
+        // Q173: a Lock of the whole primary says nothing about what changed (QEC redraws its cursor that way at its
+        // loop rate, ~150/s on a tester's machine); marking all of it dirty uploaded a full frame each time. The
+        // render thread compares the primary with its shadow copy instead and uploads only the rows that changed.
+        if (g_cfg.pollPrimary && s->dd && s->dd->primary == s && s->lockRect.left <= 0 && s->lockRect.top <= 0 &&
+            s->lockRect.right >= s->w && s->lockRect.bottom >= s->h)
+            render_scan(s);
+        else
+            render_dirty(s, &s->lockRect);
     }
     // guardtest (debug): at the 300th, 600th and 900th Unlock, write past the surface like a game bug
     // would - 4 bytes after the last row, 2 bytes before the first row, a whole row after the last one.

@@ -154,6 +154,85 @@ static LRESULT call_old(HWND h, UINT m, WPARAM w, LPARAM l)
     return s_unicode ? CallWindowProcW(s_oldProc, h, m, w, l) : CallWindowProcA(s_oldProc, h, m, w, l);
 }
 
+// Q174 cursorprobe: WM_SETCURSOR the game window got (client area / elsewhere) and how often the game answered TRUE
+static volatile LONG s_cpMsg, s_cpMsgClient, s_cpMsgTrue;
+static volatile LONG s_cpShow, s_cpSet, s_cpSetNull, s_cpClass;   // the game's ShowCursor / SetCursor / class cursor calls
+static volatile LONG s_cpCounter = 0x7FFFFFFF;   // the display counter the last ShowCursor of the game returned
+static volatile LONG s_cursorTestDue;   // cursortest: set by the render thread, done once on the game thread
+// Q174 keepcursor: the game's own ShowCursor calls (net), the counter before them, and how far we raised the counter
+static volatile LONG s_gameShowDelta;
+static LONG s_cursorBase = 0x7FFFFFFF;           // the counter of the game thread minus the game's own calls (window_attach)
+static LONG s_cursorRaised;                      // ShowCursor(TRUE) calls of ours not yet undone (game thread only)
+static volatile LONG s_cursorCheckDue;           // the render thread found the pointer hidden while it should show
+
+// the display counter of this thread, unchanged
+static int cursor_counter()
+{
+    int c = ShowCursor(TRUE) - 1;
+    ShowCursor(FALSE);
+    return c;
+}
+
+// Q174: does the game want the system pointer now? Not while it draws its own (its frames keep coming - a mission), and
+// not when its own ShowCursor calls have it hidden (a mission being loaded / the in-game menus, where the game's
+// pointer sprite is in the picture). Otherwise (briefing, menus, dialogs) it wants the system pointer.
+static bool cursor_wanted(const char **why)
+{
+    double age = render_frame_age_ms();
+    if (age < 300.0) { *why = "the game draws its own pointer (frames)"; return false; }
+    LONG base = s_cursorBase;
+    if (base != 0x7FFFFFFF && base + s_gameShowDelta < 0) { *why = "the game hid the system pointer itself"; return false; }
+    *why = "no game frames, the game shows the system pointer";
+    return true;
+}
+
+// Q174 keepcursor (game thread): a capture tool or another injected component can hide the system pointer of the game
+// thread (display counter below zero, or a NULL cursor) - cnc-ddraw owns the pointer and kept it, we left it to the game
+// and it stayed hidden. When the game wants the system pointer: our own ShowCursor(TRUE) up to 0 (remembered) and the
+// class cursor set (an arrow if there is none). When it does not: what we raised is given back, nothing else is touched.
+// setShape = answer of WM_SETCURSOR (true = the cursor was set, the message is done).
+static bool cursor_keep(HWND h, bool setShape)
+{
+    if (!g_cfg.keepCursor)
+        return false;
+    const char *why = "";
+    bool want = cursor_wanted(&why);
+    static int lastState = -1;
+    static LONG logged;
+    if (!want) {
+        if (s_cursorRaised > 0) {
+            for (LONG i = 0; i < s_cursorRaised; i++) ShowCursor(FALSE);
+            log_event("cursor: %ld raise(s) of ours given back - %s (counter now %d)", s_cursorRaised, why, cursor_counter());
+            s_cursorRaised = 0;
+        }
+        if (lastState != 0) {
+            lastState = 0;
+            log_event("cursor: system pointer left to the game - %s", why);
+        }
+        return false;
+    }
+    int raised = 0, before = cursor_counter();
+    while (before + raised < 0 && raised < 64) {
+        ShowCursor(TRUE);
+        raised++;
+    }
+    s_cursorRaised += raised;
+    HCURSOR cls = (HCURSOR)GetClassLongPtrA(h, GCLP_HCURSOR);
+    HCURSOR shape = cls ? cls : LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
+    HCURSOR was = NULL;
+    if (setShape || raised)
+        was = SetCursor(shape);
+    if (lastState != 1) {
+        lastState = 1;
+        log_event("cursor: system pointer kept visible over the game - %s", why);
+    }
+    if ((raised || (setShape && !was)) && InterlockedIncrement(&logged) <= 50)
+        log_event("cursor: pointer was hidden from outside - counter %d%s, %s; raised by %d (ours outstanding %ld), cursor set "
+                  "to %s %p", before, before < 0 ? " (below 0)" : "", was ? "a cursor was set" : "no cursor was set (NULL)",
+                  raised, s_cursorRaised, cls ? "the class cursor" : "the arrow", shape);
+    return setShape;
+}
+
 static void release_stuck_keys(const char *why);
 
 // game_handles_close=false: the close button ends the game. The game's own WM_CLOSE handling runs
@@ -229,6 +308,27 @@ static void close_requested()
 static LRESULT CALLBACK sub_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     jr(J_SUBMSG, (ULONG_PTR)h, m, w);
+    if (s_cursorTestDue && InterlockedExchange(&s_cursorTestDue, 0)) {
+        // cursortest (debug): what an injected component hiding the cursor does, on the game's own thread
+        int c = ShowCursor(FALSE);
+        HCURSOR was = SetCursor(NULL);
+        log_event("cursortest: ShowCursor(FALSE) -> counter %d, SetCursor(NULL) (was %p) on the game thread %lu", c, was,
+                  GetCurrentThreadId());
+    }
+    if (s_cursorCheckDue && InterlockedExchange(&s_cursorCheckDue, 0))
+        cursor_keep(h, false);
+    if (m == WM_SETCURSOR) {
+        if (g_cfg.cursorProbe) {
+            InterlockedIncrement(&s_cpMsg);
+            if (LOWORD(l) == HTCLIENT) InterlockedIncrement(&s_cpMsgClient);
+        }
+        // Q174: over the game picture (the window or one of its dialogs) the pointer is ours to keep visible
+        if (LOWORD(l) == HTCLIENT && ((HWND)w == h || IsChild(h, (HWND)w)) && cursor_keep(h, true))
+            return TRUE;
+        LRESULT r = call_old(h, m, w, l);
+        if (r && g_cfg.cursorProbe) InterlockedIncrement(&s_cpMsgTrue);
+        return r;
+    }
     if (m == s_hotkeyMsg && s_hotkeyMsg) {
         if (w == 1) {
             int to = s_present != PR_WINDOWED ? PR_WINDOWED : g_cfg.windowed ? PR_FULLSCREEN : PR_EXCLUSIVE;
@@ -802,10 +902,72 @@ void window_pump()
 // render thread, about once a second: a game thread that stops calling us for more than 2 s while it
 // is busy - it does not answer a WM_NULL within 250 ms either (a game idle in its message loop, e.g.
 // behind the Esc menu, does) - is a long frame; windows Windows considers hung are logged as well.
+// Q174 keepcursor (render thread, every tick, at most every 50 ms): a pointer hidden while the mouse rests over the game,
+// when the game wants the system pointer, is put back on the game thread (WM_SETCURSOR only comes when the mouse moves)
+void window_cursor_tick()
+{
+    HWND h = s_hwnd;
+    if (!g_cfg.keepCursor || !h || !s_oldProc)
+        return;
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (now - last < 50)
+        return;
+    last = now;
+    if (GetForegroundWindow() != h || IsIconic(h))
+        return;
+    CURSORINFO k;
+    k.cbSize = sizeof(k);
+    POINT p;
+    const char *why;
+    if (GetCursorInfo(&k) && !(k.flags & CURSOR_SHOWING) && GetCursorPos(&p)) {
+        HWND under = WindowFromPoint(p);
+        if (under && GetAncestor(under, GA_ROOT) == h && cursor_wanted(&why) && !s_cursorCheckDue) {
+            InterlockedExchange(&s_cursorCheckDue, 1);   // done on the game thread (the counter is the game thread's)
+            PostMessageA(h, WM_NULL, 0, 0);
+        }
+    }
+}
+
+// Q174: the OS cursor state once a second (cursorprobe), and the cursortest trigger
+static void cursor_watch(HWND h)
+{
+    static DWORD start;
+    if (!start) start = GetTickCount();
+    // cursortest=N: once after N s; cursortest=-N: every second from N s on (a component that keeps hiding the pointer)
+    int at = g_cfg.cursorTest < 0 ? -g_cfg.cursorTest : g_cfg.cursorTest;
+    if (at > 0 && h && GetTickCount() - start >= (DWORD)at * 1000) {
+        static bool done;
+        if (!done || g_cfg.cursorTest < 0) {
+            done = true;
+            InterlockedExchange(&s_cursorTestDue, 1);
+            PostMessageA(h, WM_NULL, 0, 0);   // the next message of the game thread runs it
+        }
+    }
+    if (!g_cfg.cursorProbe || !h)
+        return;
+    CURSORINFO ci;
+    ci.cbSize = sizeof(ci);
+    BOOL ok = GetCursorInfo(&ci);
+    POINT p;
+    GetCursorPos(&p);
+    HWND under = WindowFromPoint(p);
+    HWND top = under ? GetAncestor(under, GA_ROOT) : NULL;
+    log_event("cursorprobe: %s flags=0x%lX (%s) hCursor=%p at (%ld,%ld) over %s | class cursor %p | foreground %s | "
+              "WM_SETCURSOR so far %ld (client %ld, game TRUE %ld) | game ShowCursor %ld (counter %ld) SetCursor %ld (NULL %ld) "
+              "SetClassLong(GCL_HCURSOR) %ld",
+              ok ? "GetCursorInfo" : "GetCursorInfo FAILED", ci.flags,
+              (ci.flags & CURSOR_SHOWING) ? "showing" : (ci.flags & 2 /* CURSOR_SUPPRESSED */) ? "suppressed" : "HIDDEN",
+              ci.hCursor, p.x, p.y, top == h ? "the game window" : under ? "another window" : "nothing",
+              (void *)GetClassLongPtrA(h, GCLP_HCURSOR), GetForegroundWindow() == h ? "game" : "other", s_cpMsg,
+              s_cpMsgClient, s_cpMsgTrue, s_cpShow, s_cpCounter, s_cpSet, s_cpSetNull, s_cpClass);
+}
+
 void window_watch()
 {
     lockcursor_watch();
     HWND h = s_hwnd;
+    cursor_watch(h);
     if (!h || !s_lastCall)
         return;
     DWORD now = GetTickCount(), gap = now - s_lastCall;
@@ -1023,6 +1185,14 @@ void window_attach(HWND hwnd)
     // (old behaviour) the style is removed so that the GL output covers the children.
     s_hadClipChildren = (style & WS_CLIPCHILDREN) != 0;
     s_gameClipChildren = s_hadClipChildren;
+    {   // Q174 keepcursor: the display counter of the game thread before the game's own ShowCursor calls
+        int c = cursor_counter();
+        s_cursorBase = c - s_gameShowDelta;
+        HCURSOR cls = (HCURSOR)GetClassLongPtrA(hwnd, GCLP_HCURSOR);
+        log_event("cursor: game thread %lu, display counter %d (the game's own ShowCursor so far %+ld), class cursor %p%s - "
+                  "keepcursor %s", GetCurrentThreadId(), c, s_gameShowDelta, cls, cls ? "" : " (none: the arrow is used)",
+                  g_cfg.keepCursor ? "on" : "off");
+    }
     if (s_hadClipChildren && keep_clip_children()) {
         log_event("window_attach: WS_CLIPCHILDREN kept (the dialogs get the picture painted into them)");
         s_hadClipChildren = false;
@@ -2226,6 +2396,53 @@ static HDC WINAPI h_GetWindowDC(HWND h)
     return r_GetWindowDC(h);
 }
 
+// --- Q174 cursorprobe: what the game does with the OS cursor -------------------------------------------------
+typedef int(WINAPI *PFN_ShowCursor)(BOOL);
+typedef HCURSOR(WINAPI *PFN_SetCursor)(HCURSOR);
+typedef DWORD(WINAPI *PFN_SetClassLongA)(HWND, int, LONG);
+static PFN_ShowCursor r_ShowCursor;
+static PFN_SetCursor r_SetCursor;
+static PFN_SetClassLongA r_SetClassLongA;
+
+static int WINAPI h_ShowCursor(BOOL show)
+{
+    int r = r_ShowCursor(show);
+    InterlockedExchangeAdd(&s_gameShowDelta, show ? 1 : -1);   // keepcursor: what the game itself wants
+    LONG n = InterlockedIncrement(&s_cpShow);
+    InterlockedExchange(&s_cpCounter, r);
+    if (g_cfg.cursorProbe && n <= 40) {
+        char mod[96];
+        caller_module(_ReturnAddress(), mod, sizeof(mod));
+        log_event("cursorprobe: ShowCursor(%s) -> counter %d (thread %lu) from %s", show ? "TRUE" : "FALSE", r,
+                  GetCurrentThreadId(), mod);
+    }
+    return r;
+}
+
+static HCURSOR WINAPI h_SetCursor(HCURSOR c)
+{
+    HCURSOR old = r_SetCursor(c);
+    LONG n = InterlockedIncrement(&s_cpSet);
+    if (!c) InterlockedIncrement(&s_cpSetNull);
+    if (n <= 40) {
+        char mod[96];
+        caller_module(_ReturnAddress(), mod, sizeof(mod));
+        log_event("cursorprobe: SetCursor(%p) (was %p, thread %lu) from %s", c, old, GetCurrentThreadId(), mod);
+    }
+    return old;
+}
+
+static DWORD WINAPI h_SetClassLongA(HWND h, int i, LONG v)
+{
+    DWORD r = r_SetClassLongA(h, i, v);
+    if (i == GCL_HCURSOR && InterlockedIncrement(&s_cpClass) <= 40) {
+        char mod[96];
+        caller_module(_ReturnAddress(), mod, sizeof(mod));
+        log_event("cursorprobe: SetClassLong(%p, GCL_HCURSOR, %08lX) (was %08lX) from %s", h, (DWORD)v, r, mod);
+    }
+    return r;
+}
+
 static HDC WINAPI h_BeginPaint(HWND h, LPPAINTSTRUCT ps)
 {
     HDC dc = r_BeginPaint(h, ps);
@@ -2484,6 +2701,19 @@ void hooks_install()
             {(void **)&r_SetWindowPos, (void *)h_SetWindowPos},       {(void **)&r_MoveWindow, (void *)h_MoveWindow},
         };
         for (const HookEntry &e : m) user[nUser++] = e;
+    }
+    if (g_cfg.keepCursor || g_cfg.cursorProbe) {   // keepcursor: the game's own ShowCursor calls are counted
+        r_ShowCursor = (PFN_ShowCursor)GetProcAddress(u32, "ShowCursor");
+        user[nUser++] = {(void **)&r_ShowCursor, (void *)h_ShowCursor};
+    }
+    if (g_cfg.cursorProbe) {
+        r_SetCursor = (PFN_SetCursor)GetProcAddress(u32, "SetCursor");
+        r_SetClassLongA = (PFN_SetClassLongA)GetProcAddress(u32, "SetClassLongA");
+        const HookEntry c[] = {
+            {(void **)&r_SetCursor, (void *)h_SetCursor},
+            {(void **)&r_SetClassLongA, (void *)h_SetClassLongA},
+        };
+        for (const HookEntry &e : c) user[nUser++] = e;
     }
     if (g_cfg.trace) {
         r_GetDC = (PFN_GetDC)GetProcAddress(u32, "GetDC");

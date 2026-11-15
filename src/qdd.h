@@ -182,6 +182,10 @@ struct Config {
     int  frameFallback;   // Q165: ms without such a copy before the frame-less way (dirty rects + pollprimary) takes over again
     int  renderPriority;  // Q164 experiment: SetThreadPriority of the render thread (0 = normal, default; 1 = above normal)
     bool emptyPresents;   // Q164 experiment: legacy - also present on a wake-up that brought nothing new (default true)
+    bool keepCursor;      // Q174: keep the system pointer visible over the game when the game wants it (menus), whatever
+                          // another component (a capture tool) did to it; never while the game draws its own pointer
+    bool cursorProbe;     // Q174 debug: the game's ShowCursor / SetCursor / class cursor calls, WM_SETCURSOR, the cursor state 1/s
+    int  cursorTest;      // Q174 debug: N s after the first present the game thread calls ShowCursor(FALSE) + SetCursor(NULL) once
     bool paceStats;       // Q164 debug: present interval / upload time percentiles every 10 s in every mode
     bool blitStats;       // Q152 debug: full-size copies by surface pair, and what the game touches after a copy to the primary
     bool fusedUpload;     // Q153 B: changed rows read once from the primary, into the shadow and the pixel buffer
@@ -280,7 +284,11 @@ void clipper_release(Clipper *c);
 void render_start(HWND hwnd);
 void render_stop();
 void render_dirty(Surface *s, const RECT *r);   // r == NULL => whole surface
-void render_frame(Surface *s);                  // Q165: a copy onto the whole primary - the game finished a frame
+void render_frame(Surface *s, bool exact);      // Q165: a copy onto the whole primary - the game finished a frame
+                                                // (Q173: exact = all of it, else full width from row 0, >= 90 % high)
+void render_scan(Surface *s);
+void window_cursor_tick();                      // Q174: keepcursor check from the render thread
+double render_frame_age_ms();                   // Q174: ms since the game's last frame copy to the primary (huge if none)                   // Q173: Unlock of a whole-surface Lock: which rows changed is unknown
 void render_full_dirty();
 void render_palette_changed(Palette *p);
 void render_kick();                              // request a redraw

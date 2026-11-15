@@ -1,6 +1,6 @@
 # QuantumDDraw
 
-自研的最小 `ddraw.dll`：把 DirectDraw 游戏（目标 `gamemd.exe` / 尤里的复仇 + Ares / Quantum Entropy Change / Mental Omega）的系统内存表面用 **OpenGL 1.1 固定管线** 画到窗口里。
+自研的最小 `ddraw.dll`：把 DirectDraw 游戏（目标 `gamemd.exe` / 尤里的复仇 + Ares / Mental Omega）的系统内存表面用 **OpenGL 1.1 固定管线** 画到窗口里。
 不含第三方代码，只用 Windows SDK + 系统 `opengl32.dll`。x86，`/MT` 静态 CRT，目标 Win7 SP1 → Win11。
 
 DLL 自带探针：每个接口方法都有调用计数，`ddraw.log` 每 5 秒重写一次。
@@ -57,6 +57,7 @@ Syringe.exe "gamemd.exe" -SPAWN -CD -SPEEDCONTROL -LOG
 | `savesettings` | `true` | 把窗口状态的客户区位置/尺寸和“是否全屏”写进 DLL 旁的 `quantumddraw.state`，下次启动恢复。Q144 起同时记下所在显示器的设备名（`monitor=\\.\DISPLAY1`）和相对它左上角的位置（`rel_left` / `rel_top`），恢复时以它为准：换了主屏（虚拟桌面坐标整体平移）也回到同一台显示器的同一位置；那台显示器不在了就放到主屏的同一相对位置。最后仍不在任何工作区内时拉回最近的显示器 |
 | `adjmouse` | `1.0` | 光标锁定时的鼠标速度倍率（0.1–10）。在 `GetCursorPos` 钩子里按相对位移累加并把真实光标放回游戏位置，鼠标消息用同一个位置（不抖）；未锁定时恒为 1:1。cnc-ddraw 的布尔值 `true/false` 按 1.0 处理 |
 | `center_cursor_fix` | `true` | 游戏画面出现时和每次窗口/全屏切换后，把光标放到游戏画面中央（仅当游戏在前台） |
+| `keepcursor` | `true` | 游戏需要系统指针时（简报、菜单、对话框），即使进程里别的组件（如录屏软件）把它藏了，也保持可见（窗口和全屏都适用）；游戏自己绘制指针时（任务中）不显示系统指针，不会出现两个指针。日志 `cursor:` 行记录每次判断。调试键：`cursorprobe=true` 记录游戏的所有光标调用和每秒的光标状态，`cursortest=N` 在 N 秒后于游戏线程隐藏指针一次（`-N` 每秒重复） |
 | `letterboxoffset` | `true` | 画面有黑边或缩放时（如 2560x1600 屏全屏显示 2560x1440 游戏），游戏子对话框（简报、Esc 菜单的按钮）的鼠标输入跟着画面走：消息钩子把每条鼠标消息的真实位置换算成游戏坐标，交给布局上位于该处的子窗口（或持有捕获的窗口），并换成它的客户坐标。子窗口本身的位置不动（游戏从布局读回位置来画对话框）。画面 1:1 贴在客户区原点时不介入。游戏放置的顶层弹窗也定位到画面内 |
 | `fix_alt_key_stuck` | `false` | 失焦 / 回到前台时：`false` = 游戏收到过 Alt 按下却没收到抬起时补发一个 Alt 抬起（`WM_KEYUP`）；`true` = 另外把线程键盘状态里实际已松开的 Alt / Ctrl / Shift 清掉（`SetKeyboardState`），并补发这三个键的抬起 |
 | `fix_not_responding` | `false` | 游戏线程在我们的绘制调用（Lock / Blt / BltFast / Flip）里、且 1 秒没取过消息时：`false` = `PeekMessage(PM_NOREMOVE\|PM_QS_INPUT)` 一次（Windows 就不会判定“未响应”）；`true` = 取出并分派一条窗口消息。呈现线程每秒检查一次：游戏线程 2 秒没有绘制调用且 250 ms 内不回应 `WM_NULL` 记为“long frame”，`IsHungAppWindow` 为真记为 “NOT RESPONDING” |

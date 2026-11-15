@@ -61,6 +61,9 @@ static long s_dirtyN;               // presentsync: drawing calls that changed t
 // Q165 framesync: full-surface copies to the primary (game frames), the time of the last one (qpc_ms), and the
 // intervals between them (written by the game thread only, read and cleared at each stats flush)
 static volatile LONG s_frameN;
+static volatile LONG s_frameNear;  // Q173: of them, copies of full width and >= 90 % height (not the whole primary)
+static bool s_scanDirty;           // Q173: a whole-primary Lock was released: the changed rows are found by comparison
+static volatile LONG s_scanReqs;   // Q173: such Unlocks (game thread)
 static volatile double s_lastFrameMs;
 static long s_frameHist[1000];
 static long s_frameHistN;
@@ -224,7 +227,7 @@ static double qpc_ms();
 
 // Q165: the game copied a surface onto the whole primary - its frame is complete. Marks everything dirty (the copy is
 // what gets uploaded) and counts the frame for the render thread; the interval between frames goes to the histogram.
-void render_frame(Surface *s)
+void render_frame(Surface *s, bool exact)
 {
     DDraw *dd = g_dd;
     if (!dd || dd->primary != s || !s_thread)
@@ -243,8 +246,31 @@ void render_frame(Surface *s)
     s_dirtyN++;
     s_lastFrameMs = now;
     InterlockedIncrement(&s_frameN);
+    if (!exact)
+        InterlockedIncrement(&s_frameNear);
     LeaveCriticalSection(&s_dcs);
     SetEvent(s_evt);
+}
+
+// Q173: Unlock of a whole-surface Lock of the primary - wake the render thread for a comparison with the shadow copy
+void render_scan(Surface *s)
+{
+    DDraw *dd = g_dd;
+    if (!dd || dd->primary != s || !s_thread)
+        return;
+    ensure_cs();
+    lock_enter(&s_dcs, LK_DIRTY);
+    s_scanDirty = true;
+    s_dirtyN++;
+    LeaveCriticalSection(&s_dcs);
+    InterlockedIncrement(&s_scanReqs);
+    SetEvent(s_evt);
+}
+
+double render_frame_age_ms()
+{
+    double last = s_lastFrameMs;
+    return last > 0 ? qpc_ms() - last : 1e12;
 }
 
 void render_full_dirty()
@@ -414,6 +440,8 @@ struct Stats {
     long ivHist[IV_BINS];   // the same intervals in 0.25 ms bins, for the presentsync / pacestats percentiles
     long upHist[IV_BINS];   // pacestats: upload time per present in 0.05 ms bins (the last bin holds 50 ms and more)
     long frameTicks, deferred;   // framesync: presents for a game frame; wake-ups whose partial writes waited for the frame
+    long scanTicks, capped;      // Q173: framesync ticks for a released whole-primary Lock (rows found by comparison);
+                                 // wake-ups that waited because the last present was less than one refresh ago
     // where in the refresh cycle each present ended (0 = right at the vertical blank, 1 = just before the next)
     long phN, phEarly;
     double phSum;
@@ -608,14 +636,17 @@ static void stats_flush(Stats &s, double seconds, const char *how, double period
     }
     {   // Q165: the game's frames (full-surface copies to the primary) as the game made them
         long n = s_frameHistN;
-        if (n > 1 || s.frameTicks || s.deferred) {
+        LONG nearN = InterlockedExchange(&s_frameNear, 0), scans = InterlockedExchange(&s_scanReqs, 0);
+        if (n > 1 || s.frameTicks || s.deferred || s.scanTicks || s.capped || scans) {
             double at[3] = {0, 0, 0}, top = 0;
             if (n > 1)
                 hist_percentiles(s_frameHist, n, 0.25, at, &top);
-            log_event("game frames %.1fs [%s]: %ld full copies to the primary (%.1f/s), interval p50 %.2f ms p90 %.2f p99 %.2f "
-                      "max %.2f | framesync %s: %ld presents for a frame, %ld wake-ups with partial writes held back",
-                      seconds, mode, n, n / seconds, at[0], at[1], at[2], top,
-                      g_cfg.frameSync ? "on" : "off", s.frameTicks, s.deferred);
+            log_event("game frames %.1fs [%s]: %ld full copies to the primary (%.1f/s; %ld of them full width >= 90 %% high), "
+                      "interval p50 %.2f ms p90 %.2f p99 %.2f max %.2f | framesync %s: %ld presents for a frame, %ld wake-ups "
+                      "with partial writes held back, %ld presents for a released whole-primary Lock (%ld such Unlocks, "
+                      "%.1f/s) | %ld wake-ups waited for the next refresh",
+                      seconds, mode, n, n / seconds, (long)nearN, at[0], at[1], at[2], top, g_cfg.frameSync ? "on" : "off",
+                      s.frameTicks, s.deferred, s.scanTicks, (long)scans, scans / seconds, s.capped);
         }
         memset(s_frameHist, 0, sizeof(s_frameHist));
         s_frameHistN = 0;
@@ -990,6 +1021,7 @@ static DWORD WINAPI render_thread(LPVOID)
             break;
         double t0 = qpc_ms();
         window_children_tick();
+        window_cursor_tick();
         jr_tick();
         static double lastWatch;
         if (t0 - lastWatch >= 1000.0) {
@@ -1082,13 +1114,29 @@ static DWORD WINAPI render_thread(LPVOID)
                 st.frameTicks++;
             } else if (lastFrame > 0 && t0 - lastFrame < g_cfg.frameFallback) {
                 EnterCriticalSection(&s_dcs);
-                bool pending = s_fullDirty || s_hasDirty;
+                bool pending = s_fullDirty || s_hasDirty, scanOnly = s_scanDirty && !pending;
                 LeaveCriticalSection(&s_dcs);
-                if (pending && signaled)
-                    st.deferred++;
-                nextWait = lastFrame + g_cfg.frameFallback - t0;
-                continue;
+                // Q173: a released whole-primary Lock alone (QEC's cursor between two frames) is shown now - only the
+                // rows that changed are uploaded - instead of waiting for the next frame (the cursor moved at the
+                // game's 30 fps). Partial copies of the next frame still wait for it.
+                if (scanOnly) {
+                    st.scanTicks++;
+                } else {
+                    if (pending && signaled)
+                        st.deferred++;
+                    nextWait = lastFrame + g_cfg.frameFallback - t0;
+                    continue;
+                }
             }
+        }
+        // Q173: at most one present per display refresh, except for a game frame, a window event or a rebuild - the
+        // display cannot show more, and every extra present costs a copy, an upload and a SwapBuffers on the core the
+        // game runs on. What arrives meanwhile stays dirty and goes out with the next present.
+        if (!frameTick && !forced && !rebuild && texValid && !g_cfg.vsyncTest && period > 0 && lastPresent > 0 &&
+            t0 - lastPresent < period * 0.95) {
+            st.capped++;
+            nextWait = lastPresent + period * 0.95 - t0;
+            continue;
         }
 
         EnterCriticalSection(&g_lock);
@@ -1156,6 +1204,7 @@ static DWORD WINAPI render_thread(LPVOID)
                 d = s_dirty;
             }
             s_fullDirty = s_hasDirty = false;
+            s_scanDirty = false;   // the comparison below (pollprimary) finds what the released Lock changed
             s_dirtyN = 0;
             LeaveCriticalSection(&s_dcs);
 

@@ -107,6 +107,9 @@ void config_load(HMODULE self)
     g_cfg.presentSync = read_bool(ini, "presentsync", false);   // Q163: off - coalescing made QEC stutter
     g_cfg.blitStats = read_bool(ini, "blitstats", false);
     g_cfg.paceStats = read_bool(ini, "pacestats", false);
+    g_cfg.keepCursor = read_bool(ini, "keepcursor", true);
+    g_cfg.cursorProbe = read_bool(ini, "cursorprobe", false);
+    g_cfg.cursorTest = read_int(ini, "cursortest", 0);
     // Q165: frame-coherent presentation. 50 ms rather than one 30 fps frame (33.3 ms): a shorter fallback races the
     // next frame of a 30 fps game and lets its partial writes through again.
     g_cfg.frameSync = read_bool(ini, "framesync", true);
