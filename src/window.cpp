@@ -181,24 +181,69 @@ static int cursor_counter()
 // shows it again for the briefing / menus. Frame copies are no sign of that - loading screens and menus copy the whole
 // screen now and then too (a tester's menu at 3/s handed the pointer to the game, and OBS left it hidden). Frames decide
 // only when the game's calls were never tracked (no baseline, or our ShowCursor hook is not in place).
-// why: counter, frames and the rule that decided, for the log.
-static bool cursor_wanted(char *why, int n)
+// Q179: all of that only while the game is the foreground window. With another program in front (a capture tool, Notepad -
+// the owner's repro) QEC draws no pointer of its own at all, so a game that had hidden the system pointer (a mission,
+// count -2) left nothing visible over its window: then the system pointer is shown whatever the count says.
+// why: counter, frames and the rule that decided, for the log; kind: which rule (CW_*), for the transition log.
+enum { CW_LEFT = 0, CW_COUNT, CW_INACTIVE, CW_FRAMES };
+
+// the foreground window's program when it is not ours ("Notepad.exe pid 123"); false = ours (the game, its dialogs) or none
+static bool foreign_foreground(char *name, int n)
+{
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid == GetCurrentProcessId())
+        return false;
+    static DWORD lastPid;
+    static char lastName[80];
+    if (pid != lastPid) {   // the name is read once per foreground program, not per mouse move
+        lastPid = pid;
+        strcpy_s(lastName, "?");
+        HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (ph) {
+            char full[MAX_PATH];
+            DWORD len = MAX_PATH;
+            if (QueryFullProcessImageNameA(ph, 0, full, &len)) {
+                const char *b = strrchr(full, '\\');
+                strcpy_s(lastName, b ? b + 1 : full);
+            }
+            CloseHandle(ph);
+        }
+    }
+    _snprintf_s(name, n, _TRUNCATE, "%s pid %lu", lastName, pid);
+    return true;
+}
+
+static bool cursor_wanted(char *why, int n, int *kind = NULL)
 {
     double age = render_frame_age_ms();
     char frames[48];
     if (age < 1e11) _snprintf_s(frames, sizeof(frames), _TRUNCATE, "last frame copy %.0f ms ago", age);
     else strcpy_s(frames, "no frame copy yet");
     LONG base = s_cursorBase;
-    if (base != 0x7FFFFFFF && r_ShowCursor) {
-        LONG intent = base + s_gameShowDelta;
+    bool tracked = base != 0x7FFFFFFF && r_ShowCursor != NULL;
+    LONG intent = tracked ? base + s_gameShowDelta : 0;
+    char fg[100];
+    if (foreign_foreground(fg, sizeof(fg))) {
+        char count[40];
+        if (tracked) _snprintf_s(count, sizeof(count), _TRUNCATE, "%ld", intent);
+        else strcpy_s(count, "not tracked");
+        _snprintf_s(why, n, _TRUNCATE, "rule: the game is not the foreground window (%s has the focus) - it draws no pointer "
+                    "of its own then, the system pointer is shown; its ShowCursor count %s (not used)", fg, count);
+        if (kind) *kind = CW_INACTIVE;
+        return true;
+    }
+    if (tracked) {
         bool want = intent >= 0;
-        _snprintf_s(why, n, _TRUNCATE, "rule: the game's own ShowCursor count %ld (%s); %s (not used)", intent,
+        _snprintf_s(why, n, _TRUNCATE, "rule: the game is in front, its own ShowCursor count %ld (%s); %s (not used)", intent,
                     want ? "it shows the system pointer" : "it hid the system pointer, it draws its own", frames);
+        if (kind) *kind = want ? CW_COUNT : CW_LEFT;
         return want;
     }
     bool want = !(age < 300.0);
     _snprintf_s(why, n, _TRUNCATE, "rule: frames (the game's ShowCursor count was not tracked) - %s, %s", frames,
                 want ? "no frames: the system pointer is wanted" : "frames: the game draws its own pointer");
+    if (kind) *kind = want ? CW_FRAMES : CW_LEFT;
     return want;
 }
 
@@ -211,8 +256,9 @@ static bool cursor_keep(HWND h, bool setShape)
 {
     if (!g_cfg.keepCursor)
         return false;
-    char why[200];
-    bool want = cursor_wanted(why, sizeof(why));
+    char why[300];
+    int kind = CW_LEFT;
+    bool want = cursor_wanted(why, sizeof(why), &kind);
     static int lastState = -1;
     static LONG logged;
     if (!want) {
@@ -221,9 +267,9 @@ static bool cursor_keep(HWND h, bool setShape)
             log_event("cursor: %ld raise(s) of ours given back - %s (counter now %d)", s_cursorRaised, why, cursor_counter());
             s_cursorRaised = 0;
         }
-        if (lastState != 0) {
-            lastState = 0;
-            log_event("cursor: system pointer left to the game - %s", why);
+        if (lastState != CW_LEFT) {
+            lastState = CW_LEFT;
+            log_event("cursor: system pointer left to the game - %s (counter %d)", why, cursor_counter());
         }
         return false;
     }
@@ -238,9 +284,10 @@ static bool cursor_keep(HWND h, bool setShape)
     HCURSOR was = NULL;
     if (setShape || raised)
         was = SetCursor(shape);
-    if (lastState != 1) {
-        lastState = 1;
-        log_event("cursor: system pointer kept visible over the game - %s", why);
+    if (lastState != kind) {
+        lastState = kind;
+        log_event("cursor: system pointer kept visible over the game - %s (counter %d, ours outstanding %ld)", why,
+                  cursor_counter(), s_cursorRaised);
     }
     if ((raised || (setShape && !was)) && InterlockedIncrement(&logged) <= 50)
         log_event("cursor: pointer was hidden from outside - counter %d%s, %s; raised by %d (ours outstanding %ld), cursor set "
@@ -563,6 +610,12 @@ static LRESULT CALLBACK sub_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_ACTIVATEAPP:
         s_active = w != 0;
         log_event("WM_ACTIVATEAPP %d", (int)(w != 0));
+        if (g_cfg.keepCursor) {
+            // Q179: the focus changed - the pointer over the game is decided again now, not at the next mouse move
+            log_event("cursor: game window %s (counter %d, ours outstanding %ld)", w ? "active again" : "inactive - another program has the focus",
+                      cursor_counter(), s_cursorRaised);
+            cursor_keep(h, false);
+        }
         if (!w) {
             release_stuck_buttons("focus lost");
             if (s_emu)
@@ -930,15 +983,21 @@ void window_cursor_tick()
     if (now - last < 50)
         return;
     last = now;
-    if (GetForegroundWindow() != h || IsIconic(h))
+    // Q179: whichever window has the focus (the owner's repro: Notepad in front, the pointer moved back over the game);
+    // a minimised game (a real display mode left on Alt-Tab) has nothing under the pointer
+    if (IsIconic(h))
         return;
     CURSORINFO k;
     k.cbSize = sizeof(k);
     POINT p;
-    char why[200];
-    if (GetCursorInfo(&k) && !(k.flags & CURSOR_SHOWING) && GetCursorPos(&p)) {
+    char why[300];
+    if (GetCursorInfo(&k) && GetCursorPos(&p)) {
         HWND under = WindowFromPoint(p);
-        if (under && GetAncestor(under, GA_ROOT) == h && cursor_wanted(why, sizeof(why)) && !s_cursorCheckDue) {
+        if (!under || GetAncestor(under, GA_ROOT) != h || s_cursorCheckDue)
+            return;
+        bool showing = (k.flags & CURSOR_SHOWING) != 0, want = cursor_wanted(why, sizeof(why));
+        // hidden but wanted: show it; showing with raises of ours but not wanted (focus back in a mission): give them back
+        if ((!showing && want) || (showing && !want && s_cursorRaised > 0)) {
             InterlockedExchange(&s_cursorCheckDue, 1);   // done on the game thread (the counter is the game thread's)
             PostMessageA(h, WM_NULL, 0, 0);
         }
