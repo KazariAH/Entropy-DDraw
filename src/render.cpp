@@ -1628,6 +1628,17 @@ static DWORD WINAPI render_thread(LPVOID)
         jr(J_PRESENT, changed, forced, nRects);
         if (firstPresent == 0)
             firstPresent = t3;
+        {   // Q170: which path made the first present, and the first one after every rebuild (mode / presentation switch)
+            static LONG loggedFor = -1;
+            if (loggedFor != s_rebuildCount) {
+                loggedFor = s_rebuildCount;
+                const char *path = rebuild ? "rebuild (texture re-created, full upload)" : forced ? "forced refresh (window event)"
+                                 : frameTick ? "game frame (full-surface copy to the primary)" : polled ? "pollprimary (written outside Lock/Blt)"
+                                 : changed ? "dirty rect (Blt / Unlock to the primary)" : "idle redraw";
+                log_event("render: first present%s via %s, %s, primary %dx%d", s_rebuildCount ? " after rebuild" : "", path,
+                          changed ? "new pixels" : "no new pixels", primW, primH);
+            }
+        }
         st.presents++;
         if (changed) st.updates++;
         if (changed && full) st.fullUploads++;

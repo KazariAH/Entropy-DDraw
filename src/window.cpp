@@ -11,6 +11,7 @@ static HWND s_hwnd;
 static WNDPROC s_oldProc;
 static bool s_unicode;
 static bool s_hadClipChildren;   // WS_CLIPCHILDREN removed by window_attach, restored by window_detach
+static bool s_gameClipChildren;  // Q170: the game's own window had WS_CLIPCHILDREN (whether it was kept or removed)
 static volatile bool s_emu;        // exclusive fullscreen emulated in a window
 static volatile bool s_active = true;
 static int s_appliedW, s_appliedH;
@@ -1021,6 +1022,7 @@ void window_attach(HWND hwnd)
     // QEC needs it: without it the briefing text is drawn clipped to its text box (Q146). Otherwise
     // (old behaviour) the style is removed so that the GL output covers the children.
     s_hadClipChildren = (style & WS_CLIPCHILDREN) != 0;
+    s_gameClipChildren = s_hadClipChildren;
     if (s_hadClipChildren && keep_clip_children()) {
         log_event("window_attach: WS_CLIPCHILDREN kept (the dialogs get the picture painted into them)");
         s_hadClipChildren = false;
@@ -1489,6 +1491,11 @@ void window_apply_mode(DDraw *dd)
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
     if (g_cfg.resizable)
         style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+    // Q170: the style is built anew here, so the game's WS_CLIPCHILDREN was lost for an exclusive-mode game (QEC with
+    // Video.Windowed=False). Without it QEC's dialogs (briefing, Esc menu) never got their WM_PAINT after a real display
+    // mode switch and were never drawn into the primary: a black screen. Kept as window_attach keeps it.
+    if (s_gameClipChildren && keep_clip_children())
+        style |= WS_CLIPCHILDREN;
     DWORD ex = (DWORD)GetWindowLongA(s_hwnd, GWL_EXSTYLE) & ~(WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
     ex |= WS_EX_APPWINDOW;
 
