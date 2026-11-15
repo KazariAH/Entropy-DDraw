@@ -165,6 +165,9 @@ static LONG s_cursorBase = 0x7FFFFFFF;           // the counter of the game thre
 static LONG s_cursorRaised;                      // ShowCursor(TRUE) calls of ours not yet undone (game thread only)
 static volatile LONG s_cursorCheckDue;           // the render thread found the pointer hidden while it should show
 
+typedef int(WINAPI *PFN_ShowCursor)(BOOL);
+static PFN_ShowCursor r_ShowCursor;   // keepcursor / cursorprobe: the real ShowCursor behind our hook of the game's import
+
 // the display counter of this thread, unchanged
 static int cursor_counter()
 {
@@ -173,17 +176,30 @@ static int cursor_counter()
     return c;
 }
 
-// Q174: does the game want the system pointer now? Not while it draws its own (its frames keep coming - a mission), and
-// not when its own ShowCursor calls have it hidden (a mission being loaded / the in-game menus, where the game's
-// pointer sprite is in the picture). Otherwise (briefing, menus, dialogs) it wants the system pointer.
-static bool cursor_wanted(const char **why)
+// Q174/Q178: does the game want the system pointer now? Decided by the game's own ShowCursor calls: QEC hides the system
+// pointer itself (ShowCursor(FALSE) twice) when it switches to the pointer it draws into the picture (a mission) and
+// shows it again for the briefing / menus. Frame copies are no sign of that - loading screens and menus copy the whole
+// screen now and then too (a tester's menu at 3/s handed the pointer to the game, and OBS left it hidden). Frames decide
+// only when the game's calls were never tracked (no baseline, or our ShowCursor hook is not in place).
+// why: counter, frames and the rule that decided, for the log.
+static bool cursor_wanted(char *why, int n)
 {
     double age = render_frame_age_ms();
-    if (age < 300.0) { *why = "the game draws its own pointer (frames)"; return false; }
+    char frames[48];
+    if (age < 1e11) _snprintf_s(frames, sizeof(frames), _TRUNCATE, "last frame copy %.0f ms ago", age);
+    else strcpy_s(frames, "no frame copy yet");
     LONG base = s_cursorBase;
-    if (base != 0x7FFFFFFF && base + s_gameShowDelta < 0) { *why = "the game hid the system pointer itself"; return false; }
-    *why = "no game frames, the game shows the system pointer";
-    return true;
+    if (base != 0x7FFFFFFF && r_ShowCursor) {
+        LONG intent = base + s_gameShowDelta;
+        bool want = intent >= 0;
+        _snprintf_s(why, n, _TRUNCATE, "rule: the game's own ShowCursor count %ld (%s); %s (not used)", intent,
+                    want ? "it shows the system pointer" : "it hid the system pointer, it draws its own", frames);
+        return want;
+    }
+    bool want = !(age < 300.0);
+    _snprintf_s(why, n, _TRUNCATE, "rule: frames (the game's ShowCursor count was not tracked) - %s, %s", frames,
+                want ? "no frames: the system pointer is wanted" : "frames: the game draws its own pointer");
+    return want;
 }
 
 // Q174 keepcursor (game thread): a capture tool or another injected component can hide the system pointer of the game
@@ -195,8 +211,8 @@ static bool cursor_keep(HWND h, bool setShape)
 {
     if (!g_cfg.keepCursor)
         return false;
-    const char *why = "";
-    bool want = cursor_wanted(&why);
+    char why[200];
+    bool want = cursor_wanted(why, sizeof(why));
     static int lastState = -1;
     static LONG logged;
     if (!want) {
@@ -919,10 +935,10 @@ void window_cursor_tick()
     CURSORINFO k;
     k.cbSize = sizeof(k);
     POINT p;
-    const char *why;
+    char why[200];
     if (GetCursorInfo(&k) && !(k.flags & CURSOR_SHOWING) && GetCursorPos(&p)) {
         HWND under = WindowFromPoint(p);
-        if (under && GetAncestor(under, GA_ROOT) == h && cursor_wanted(&why) && !s_cursorCheckDue) {
+        if (under && GetAncestor(under, GA_ROOT) == h && cursor_wanted(why, sizeof(why)) && !s_cursorCheckDue) {
             InterlockedExchange(&s_cursorCheckDue, 1);   // done on the game thread (the counter is the game thread's)
             PostMessageA(h, WM_NULL, 0, 0);
         }
@@ -2397,10 +2413,8 @@ static HDC WINAPI h_GetWindowDC(HWND h)
 }
 
 // --- Q174 cursorprobe: what the game does with the OS cursor -------------------------------------------------
-typedef int(WINAPI *PFN_ShowCursor)(BOOL);
 typedef HCURSOR(WINAPI *PFN_SetCursor)(HCURSOR);
 typedef DWORD(WINAPI *PFN_SetClassLongA)(HWND, int, LONG);
-static PFN_ShowCursor r_ShowCursor;
 static PFN_SetCursor r_SetCursor;
 static PFN_SetClassLongA r_SetClassLongA;
 
